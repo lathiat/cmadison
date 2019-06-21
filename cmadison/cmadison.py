@@ -16,15 +16,21 @@ from lxml import etree
 from requests.exceptions import HTTPError
 import argparse
 import gzip
-import logging as log
+import logging
 import os
 import os.path
 import requests
-import requests_cache
+from cachecontrol import CacheControl
+from cachecontrol.caches.file_cache import FileCache
 import six
 import shutil
 import tempfile
 
+logging.basicConfig()
+logging.getLogger().setLevel(logging.DEBUG)
+requests_logging = logging.getLogger("requests.packages.urllib3")
+requests_logging.setLevel(logging.DEBUG)
+requests_logging.propagate = True
 
 # Defines the default ubuntu cloud-archive repository URL.
 UCA_DEB_REPO_URL = "http://ubuntu-cloud.archive.canonical.com/ubuntu/dists"
@@ -67,6 +73,8 @@ else:
 # I'll /assume/ bandwidth is decent enough its not a super big issue.
 working_dir = tempfile.mkdtemp()
 
+cached_session = CacheControl(requests.Session(),
+                    cache=FileCache(os.path.join(CACHE_DIR, '.web_cache')))
 
 def get_files_in_remote_url(relative_path=""):
     """
@@ -79,7 +87,7 @@ def get_files_in_remote_url(relative_path=""):
     :return: list of files or folders found in the remote url.
     """
     url = "%s/%s" % (UCA_DEB_REPO_URL, relative_path)
-    resp = requests.get(url)
+    resp = cached_session.get(url)
     resp.raise_for_status()
 
     root = etree.fromstring(resp.text, etree.HTMLParser())
@@ -95,7 +103,7 @@ def get_files_in_remote_url(relative_path=""):
         if f.endswith('/'):
             f = f[:-1]
         files.append(f)
-    log.debug("Found files at %s: %s", url, files)
+    logging.debug("Found files at %s: %s", url, files)
 
     return files
 
@@ -120,7 +128,7 @@ def get_openstack_releases(dist, show_eol=False):
     :param dist: the distribution to retrieve openstack releases for.
     """
     os_releases = get_files_in_remote_url(dist)
-    log.debug("Found OpenStack releases for dist %s: %s", dist, os_releases)
+    logging.debug("Found OpenStack releases for dist %s: %s", dist, os_releases)
     if not show_eol:
         os_releases = [x for x in os_releases if x not in UNSUPPORTED_RELEASES]
 
@@ -154,14 +162,14 @@ class Sources(object):
                                     os_release=self.os_release)
 
         try:
-            resp = requests.get(url)
+            resp = cached_session.get(url)
             resp.raise_for_status()
             with open(self.fname, 'wb+') as fd:
                 for chunk in resp.iter_content(chunk_size=128):
                     fd.write(chunk)
             return True
         except HTTPError:
-            log.error("Could not download source for {dist}/"
+            logging.error("Could not download source for {dist}/"
                       "{os_release}".format(dist=self.dist,
                                             os_release=self.os_release))
             return False
@@ -265,18 +273,18 @@ def do_rmadison_search(search_for, urls=None, print_source=False):
         try:
             base_url = RMADISON_URL_MAP.get(url, None)
             if not base_url:
-                log.error("Unknown source %s", url)
+                logging.error("Unknown source %s", url)
                 continue
             params = {
                 'package': search_for,
                 'text': 'on',
             }
-            resp = requests.get(base_url, params=params)
+            resp = cached_session.get(base_url, params=params)
             resp.raise_for_status()
             print('%s:' % url)
             print(resp.text)
         except HTTPError as e:
-            log.error("Error querying url %s: %s", url, str(e))
+            logging.error("Error querying url %s: %s", url, str(e))
 
 
 def ignore_source(dist, release):
@@ -399,8 +407,8 @@ def main():
         if args.clear_cache:
             clear_cache()
 
-        if not args.no_cache:
-            setup_cache()
+        if args.no_cache:
+            cached_session = requests.Session()
 
         if 'cloud-archive' in sources:
             do_cloudarchive_search(args.package, print_prefix, args.eol)
